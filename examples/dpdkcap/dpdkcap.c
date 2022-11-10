@@ -36,6 +36,16 @@
 
 #define RTE_LOGTYPE_DPDKCAP RTE_LOGTYPE_USER1
 
+#define RSS_HASH_KEY_LENGTH 40
+static uint8_t hash_key[RSS_HASH_KEY_LENGTH] = {
+        0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A,
+        0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A,
+        0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A,
+        0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A,
+        0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A,
+};
+
+
 /* ARGP */
 const char *argp_program_version = "dpdkcap 1.1";
 const char *argp_program_bug_address = "w.b.devries@utwente.nl";
@@ -255,7 +265,8 @@ static struct core_capture_stats* cores_stats_capture_list;
 static const struct rte_eth_conf port_conf_default = {
   .rxmode = {
     .mq_mode = ETH_MQ_RX_NONE,
-    .max_rx_pkt_len = ETHER_MAX_LEN,
+    //fix old code - .max_rx_pkt_len = ETHER_MAX_LEN,
+    .max_lro_pkt_size = RTE_ETHER_MAX_LEN,
   }
 };
 
@@ -264,7 +275,7 @@ static const struct rte_eth_conf port_conf_default = {
  * coming from the mbuf_pool passed as a parameter.
  */
 static int port_init(
-    uint8_t port,
+    uint16_t port,
     const uint16_t rx_rings,
     unsigned int num_rxdesc,
     struct rte_mempool *mbuf_pool) {
@@ -312,8 +323,9 @@ static int port_init(
   /* Configure multiqueue (Activate Receive Side Scaling on UDP/TCP fields) */
   if (rx_rings > 1) {
     port_conf.rxmode.mq_mode = ETH_MQ_RX_RSS;
-    port_conf.rx_adv_conf.rss_conf.rss_key = NULL;
-    port_conf.rx_adv_conf.rss_conf.rss_hf = ETH_RSS_PROTO_MASK;
+    port_conf.rx_adv_conf.rss_conf.rss_key = hash_key;
+    port_conf.rx_adv_conf.rss_conf.rss_key_len = RSS_HASH_KEY_LENGTH;
+    port_conf.rx_adv_conf.rss_conf.rss_hf = ETH_RSS_IP; //ETH_RSS_PROTO_MASK; - trying to fix
   }
 
   /* Configure the Ethernet device. */
@@ -338,7 +350,7 @@ static int port_init(
   /* Stats bindings (if more than one queue) */
   if(dev_info.max_rx_queues > 1) {
     for (q = 0; q < rx_rings; q++) {
-      retval = rte_eth_dev_set_rx_queue_stats_mapping (port, q, q);
+      retval = rte_eth_dev_set_rx_queue_stats_mapping(port, q, q);
       if (retval) {
         RTE_LOG(WARNING, DPDKCAP, "rte_eth_dev_set_rx_queue_stats_mapping(...):"\
             " %s\n", rte_strerror(-retval));
@@ -352,7 +364,8 @@ static int port_init(
   rte_eth_promiscuous_enable(port);
 
   /* Display the port MAC address. */
-  struct ether_addr addr;
+  // fix old code
+  struct rte_ether_addr addr;
   rte_eth_macaddr_get(port, &addr);
   RTE_LOG(INFO, DPDKCAP, "Port %u: MAC=%02" PRIx8 ":%02" PRIx8 ":%02" PRIx8
       ":%02" PRIx8 ":%02" PRIx8 ":%02" PRIx8 ", RXdesc/queue=%d\n",
@@ -371,7 +384,7 @@ static volatile bool should_stop = false;
 static void signal_handler(int sig) {
   RTE_LOG(NOTICE, DPDKCAP, "Caught signal %s on core %u%s\n",
       strsignal(sig), rte_lcore_id(),
-      rte_get_master_lcore()==rte_lcore_id()?" (MASTER CORE)":"");
+      rte_get_main_lcore()==rte_lcore_id()?" (MASTER CORE)":"");
   should_stop = true;
 }
 
@@ -472,9 +485,9 @@ int main(int argc, char *argv[]) {
   /* Fills in the number of rx descriptors matrix */
   unsigned long * num_rx_desc_matrix = calloc(dev_count, sizeof(int));
   if (arguments.num_rx_desc_str_matrix != NULL &&
-      parse_matrix_opt(arguments.num_rx_desc_str_matrix,                        
+      parse_matrix_opt(arguments.num_rx_desc_str_matrix,
         num_rx_desc_matrix, dev_count) < 0) {
-    rte_exit(EXIT_FAILURE, "Invalid RX descriptors matrix.\n");                 
+    rte_exit(EXIT_FAILURE, "Invalid RX descriptors matrix.\n");
   }
 
   /* Creates the port list */
@@ -535,6 +548,8 @@ int main(int argc, char *argv[]) {
 
   nb_lcores = 0;
   /* Writing cores */
+  uint64_t fixed_mask_ipv6[2] = {(0xffffffffffffffff << (64-64)), (0xffffffffffffffff << (64-64))};
+  uint64_t fixed_subnet_ipv6[2] = {2305843009213693952,2};
   for (i=0; i<arguments.num_w_cores; i++) {
 
     //Configure writing core
@@ -547,6 +562,10 @@ int main(int argc, char *argv[]) {
     config->snaplen = arguments.snaplen;
     config->rotate_seconds = arguments.rotate_seconds;
     config->file_size_limit = arguments.file_size_limit;
+    config->mask_ip = (0xffffffff << (32-32));
+    config->subnet = 3226796290;
+    config->mask_ipv6 = fixed_mask_ipv6;
+    config->subnet_ipv6 = fixed_subnet_ipv6;
 
     //Launch writing core
     if (rte_eal_remote_launch((lcore_function_t *) write_core,
@@ -557,8 +576,8 @@ int main(int argc, char *argv[]) {
     //Add the core to the list
     lcoreid_list[nb_lcores] = core_index;
     nb_lcores++;
-
-    core_index = rte_get_next_lcore(core_index, SKIP_MASTER, 0);
+    // fix old code
+    core_index = rte_get_next_lcore(core_index, SKIP_MAIN, 0);
   }
 
   /* For each port */
@@ -595,8 +614,8 @@ int main(int argc, char *argv[]) {
       //Add the core to the list
       lcoreid_list[nb_lcores] = core_index;
       nb_lcores++;
-
-      core_index = rte_get_next_lcore(core_index, SKIP_MASTER, 0);
+      // fix old code
+      core_index = rte_get_next_lcore(core_index, SKIP_MAIN, 0);
     }
 
     /* Start the port once everything is ready to capture */
@@ -645,3 +664,4 @@ int main(int argc, char *argv[]) {
 
   return 0;
 }
+

@@ -17,6 +17,10 @@ struct core_write_config {
   unsigned int snaplen;
   unsigned long rotate_seconds;
   uint64_t file_size_limit;
+  uint32_t mask_ip;
+  uint32_t subnet;
+  uint64_t * mask_ipv6;
+  uint64_t * subnet_ipv6;
 };
 
 /* Statistics structure */
