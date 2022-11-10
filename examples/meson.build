@@ -97,7 +97,7 @@ foreach example: examples
     cflags = default_cflags
     ldflags = default_ldflags
 
-    ext_deps = []
+    ext_deps = [dependency('ncurses')]
     includes = [include_directories(example)]
     deps = ['eal', 'mempool', 'net', 'mbuf', 'ethdev', 'cmdline']
     subdir(example)

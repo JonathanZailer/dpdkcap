@@ -11,6 +11,8 @@
 #include <rte_mbuf.h>
 #include <rte_branch_prediction.h>
 #include <rte_version.h>
+#include <rte_ether.h>
+#include <rte_ip.h>
 
 #include "lzo/lzowrite.h"
 #include "pcap.h"
@@ -21,6 +23,13 @@
 #define MIN(a,b) (((a)<(b))?(a):(b))
 
 #define RTE_LOGTYPE_DPDKCAP RTE_LOGTYPE_USER1
+
+#define uint32_t_to_char(ip, a, b, c, d) do {\
+		*a = (unsigned char)(ip >> 24 & 0xff);\
+		*b = (unsigned char)(ip >> 16 & 0xff);\
+		*c = (unsigned char)(ip >> 8 & 0xff);\
+		*d = (unsigned char)(ip & 0xff);\
+	} while (0)
 
 /*
  * Change file name from template
@@ -46,6 +55,88 @@ static void format_from_template(
   strftime(filename, DPDKCAP_OUTPUT_FILENAME_LENGTH, str_buf,
       localtime(&(file_start->tv_sec)));
 #pragma GCC diagnostic pop
+}
+
+static void
+ipv4_hdr_print(struct rte_ipv4_hdr *hdr)
+{
+	char a, b, c, d;
+
+	uint32_t_to_char(rte_bswap32(hdr->src_addr), &a, &b, &c, &d);
+	printf("src: %3hhu.%3hhu.%3hhu.%3hhu \t", a, b, c, d);
+
+	uint32_t_to_char(rte_bswap32(hdr->dst_addr), &a, &b, &c, &d);
+	printf("dst: %3hhu.%3hhu.%3hhu.%3hhu", a, b, c, d);
+}
+
+static uint32_t
+ipv4_obfuscating(uint32_t addr,uint32_t subnet,uint32_t mask_ip)
+{
+	 char a, b, c, d;
+         int16_t tmp1;
+         bool res_a;
+         uint32_t new_ip;
+         if (((rte_bswap32(addr)) & mask_ip) == (subnet & mask_ip)) {
+              uint32_t_to_char(rte_bswap32(addr), &a, &b, &c, &d);
+	      tmp1 = d+a;
+	      res_a = tmp1 < 256;
+	      d = res_a ? d+a : (int16_t)d+a-256;
+	      a = res_a + (a / 10);
+	      new_ip = ((uint32_t)a) << 8;
+	      new_ip = new_ip + ((uint32_t)b) << 8;
+	      new_ip = new_ip + ((uint32_t)c) << 8;
+	      new_ip = new_ip + ((uint32_t)d);
+	      return rte_bswap32(new_ip);
+	 }
+	 return addr;
+}
+
+static void
+ipv6_obfuscating(char * addr,uint64_t * subnet,uint64_t * mask_ip)
+{
+         int16_t tmp1;
+         bool res_a;
+         uint64_t faddr[2];
+         faddr[0] = (uint64_t)(((uint64_t)addr[0] << 56) | ((uint64_t)addr[1] << 48) | ((uint64_t)addr[2] << 40) | ((uint64_t)addr[3] << 32) | ((uint64_t)addr[4] << 24) | ((uint64_t)addr[5] << 16) | ((uint64_t)addr[6] << 8) | (uint64_t)addr[7] );
+         faddr[1] = (uint64_t)(((uint64_t)addr[8] << 56) | ((uint64_t)addr[9] << 48) | ((uint64_t)addr[10] << 40) | ((uint64_t)addr[11] << 32) | ((uint64_t)addr[12] << 24) | ((uint64_t)addr[13] << 16) | ((uint64_t)addr[14] << 8) | (uint64_t)addr[15] );
+         if (((faddr[0] & mask_ip[0]) == (subnet[0] & mask_ip[0])) && ((faddr[1] & mask_ip[1]) == (subnet[1] & mask_ip[1]))) {
+	      tmp1 = addr[7]+addr[8];
+	      res_a = tmp1 < 256;
+	      addr[7] = res_a ? addr[7]+addr[8] : (int16_t)addr[7]+addr[8]-256;
+	      addr[8] = res_a + (addr[8] / 10);
+	      tmp1 = addr[15]+addr[14];
+	      res_a = tmp1 < 256;
+	      addr[15] = res_a ? addr[15]+addr[14] : (int16_t)addr[15]+addr[14]-256;
+	      addr[14] = res_a + (addr[14] / 10);
+	 }
+}
+
+static void
+ipv6_hdr_print(struct rte_ipv6_hdr *hdr)
+{
+	uint8_t *addr;
+
+	addr = hdr->src_addr;
+	printf("src: %4hx:%4hx:%4hx:%4hx:%4hx:%4hx:%4hx:%4hx \t",
+	       (uint16_t)((addr[0] << 8) | addr[1]),
+	       (uint16_t)((addr[2] << 8) | addr[3]),
+	       (uint16_t)((addr[4] << 8) | addr[5]),
+	       (uint16_t)((addr[6] << 8) | addr[7]),
+	       (uint16_t)((addr[8] << 8) | addr[9]),
+	       (uint16_t)((addr[10] << 8) | addr[11]),
+	       (uint16_t)((addr[12] << 8) | addr[13]),
+	       (uint16_t)((addr[14] << 8) | addr[15]));
+
+	addr = hdr->dst_addr;
+	printf("dst: %4hx:%4hx:%4hx:%4hx:%4hx:%4hx:%4hx:%4hx",
+	       (uint16_t)((addr[0] << 8) | addr[1]),
+	       (uint16_t)((addr[2] << 8) | addr[3]),
+	       (uint16_t)((addr[4] << 8) | addr[5]),
+	       (uint16_t)((addr[6] << 8) | addr[7]),
+	       (uint16_t)((addr[8] << 8) | addr[9]),
+	       (uint16_t)((addr[10] << 8) | addr[11]),
+	       (uint16_t)((addr[12] << 8) | addr[13]),
+	       (uint16_t)((addr[14] << 8) | addr[15]));
 }
 
 /*
@@ -244,6 +335,21 @@ int write_core(const struct core_write_config * config) {
     for (i = 0; i < to_write; i++) {
       //Cast to packet
       bufptr = dequeued[i];
+      // can change ip here!!!!!!!!!!!!!!!
+      struct rte_ipv4_hdr *ipv4_hdr;
+      struct rte_ipv6_hdr *ipv6_hdr;
+      if (RTE_ETH_IS_IPV4_HDR(bufptr->packet_type)) {
+          ipv4_hdr = rte_pktmbuf_mtod_offset(bufptr, struct rte_ipv4_hdr *, sizeof(struct rte_ether_hdr));
+          ipv4_hdr->src_addr = ipv4_obfuscating(ipv4_hdr->src_addr, config->subnet, config->mask_ip);
+          ipv4_hdr->dst_addr = ipv4_obfuscating(ipv4_hdr->dst_addr, config->subnet, config->mask_ip);
+      } else if (RTE_ETH_IS_IPV6_HDR(bufptr->packet_type)) {
+          ipv6_hdr = rte_pktmbuf_mtod_offset(bufptr, struct rte_ipv6_hdr *, sizeof(struct rte_ether_hdr));
+          ipv6_obfuscating(ipv6_hdr->src_addr, config->subnet_ipv6, config->mask_ipv6);
+          ipv6_obfuscating(ipv6_hdr->dst_addr, config->subnet_ipv6, config->mask_ipv6);
+      }
+
+
+
       wire_packet_length = rte_pktmbuf_pkt_len(bufptr);
 
       //Truncate packet if needed
